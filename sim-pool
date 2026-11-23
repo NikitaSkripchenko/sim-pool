@@ -1,0 +1,355 @@
+#!/usr/bin/env python3
+"""Share two disposable iOS simulators across local XCTest runs."""
+
+import argparse
+from contextlib import contextmanager
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
+import uuid
+
+LIMIT = 2
+SIMCTL = ["xcrun", "simctl"]
+HOME = Path(os.environ.get("SIM_POOL_HOME", "~/Library/Application Support/sim-pool")).expanduser().resolve()
+CANCELLED = False
+
+
+class PoolError(Exception):
+    pass
+
+
+def tell(message):
+    print(f"sim-pool: {message}", file=sys.stderr, flush=True)
+
+
+def cancel(*_):
+    global CANCELLED
+    CANCELLED = True
+
+
+def alive(pid, *, group=False):
+    if pid is None:
+        return False
+    try:
+        (os.killpg if group else os.kill)(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+@contextmanager
+def locked():
+    HOME.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with (HOME / "lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
+def read_state():
+    file = HOME / "pool.json"
+    if not file.exists():
+        raise PoolError("Run sim-pool init with two disposable simulator UDIDs first.")
+    return json.loads(file.read_text())
+
+
+def save_state(state):
+    temp = HOME / "pool.json.tmp"
+    with temp.open("w") as file:
+        json.dump(state, file, indent=2)
+        file.flush()
+        os.fsync(file.fileno())
+    temp.replace(HOME / "pool.json")
+
+
+def inventory():
+    devices = {}
+    for arguments in ([], ["--set", "testing"]):
+        command = SIMCTL + arguments + ["list", "devices", "--json"]
+        result = subprocess.run(command, capture_output=True, text=True, timeout=10)
+        if result.returncode:
+            raise PoolError(result.stderr.strip() or "Could not list simulator devices.")
+        for runtime, entries in json.loads(result.stdout)["devices"].items():
+            for device in entries:
+                udid = device["udid"]
+                if udid in devices:
+                    raise PoolError(f"Duplicate simulator UDID {udid} across device sets.")
+                devices[udid] = dict(device, runtime=runtime, default=not arguments)
+    return devices
+
+
+def initialize(udids):
+    udids = [str(uuid.UUID(value)).upper() for value in udids]
+    if len(set(udids)) != LIMIT:
+        raise PoolError("Select two different, disposable iOS simulators.")
+    with locked():
+        if (HOME / "pool.json").exists():
+            raise PoolError(f"A pool is already configured at {HOME}.")
+        devices = inventory()
+        for udid in udids:
+            device = devices.get(udid, {})
+            if not (device.get("default") and device.get("isAvailable")
+                    and device["runtime"].startswith("com.apple.CoreSimulator.SimRuntime.iOS-")
+                    and device["state"] == "Shutdown"):
+                raise PoolError(f"{udid} must be an available, shut-down iOS device in the default set.")
+        save_state({"devices": udids, "leases": {}})
+    print("Pool configured. Every test run erases its assigned simulator.")
+
+
+def reserve():
+    waiting = False
+    while not CANCELLED:
+        with locked():
+            state = read_state()
+            leases = state["leases"]
+            reserved = {udid for udid, lease in leases.items() if not lease.get("blocked")}
+            occupied = reserved
+            if len(reserved) < LIMIT:
+                devices = inventory()
+                occupied = reserved | {udid for udid, device in devices.items() if device["state"] != "Shutdown"}
+                if len(occupied) < LIMIT and not CANCELLED:
+                    for udid in state["devices"]:
+                        device = devices.get(udid, {})
+                        if udid not in leases and device.get("isAvailable") and device["state"] == "Shutdown":
+                            leases[udid] = {"owner": os.getpid(), "cwd": str(Path.cwd())}
+                            save_state(state)
+                            return udid
+            if not waiting:
+                tell(f"Waiting for a slot ({len(occupied)} active or reserved devices). Ctrl-C cancels.")
+                waiting = True
+        time.sleep(1)
+    return None
+
+
+def update_lease(udid, **changes):
+    with locked():
+        state = read_state()
+        lease = state["leases"][udid]
+        if lease["owner"] != os.getpid():
+            raise PoolError(f"Lost ownership of {udid}.")
+        lease.update(changes)
+        save_state(state)
+
+
+def release(udid):
+    with locked():
+        state = read_state()
+        if state["leases"][udid]["owner"] != os.getpid():
+            raise PoolError(f"Lost ownership of {udid}.")
+        del state["leases"][udid]
+        save_state(state)
+
+
+# A worker waits until its process group is recorded. If the runner dies first,
+# the pipe closes and the worker exits without starting an external command.
+WORKER = """import os, sys
+fd = int(sys.argv[1])
+ack = os.read(fd, 1)
+os.close(fd)
+if ack:
+    os.execvp(sys.argv[2], sys.argv[2:])
+"""
+
+
+def stop_worker(process):
+    for sig, grace in ((signal.SIGTERM, 3), (signal.SIGKILL, 2)):
+        if alive(process.pid, group=True):
+            try:
+                os.killpg(process.pid, sig)
+            except ProcessLookupError:
+                pass
+        deadline = time.monotonic() + grace
+        while time.monotonic() < deadline:
+            process.poll()
+            if not alive(process.pid, group=True):
+                return
+            time.sleep(0.1)
+    raise PoolError(f"Worker group {process.pid} is still active.")
+
+
+def run_worker(udid, command, *, timeout=None, cancellable=False):
+    reader, writer = os.pipe()
+    process = None
+    try:
+        process = subprocess.Popen(
+            [sys.executable, "-c", WORKER, str(reader), *command],
+            pass_fds=(reader,), start_new_session=True,
+        )
+        update_lease(udid, worker=process.pid)
+        os.write(writer, b"1")
+        started = time.monotonic()
+        while True:
+            if cancellable and CANCELLED:
+                return 130
+            code = process.poll()
+            if code is not None:
+                return code if code >= 0 else 128 - code
+            if timeout is not None and time.monotonic() - started >= timeout:
+                raise PoolError(f"Timed out running {' '.join(command)}.")
+            time.sleep(0.1)
+    finally:
+        os.close(reader)
+        os.close(writer)
+        if process is not None:
+            stop_worker(process)
+            update_lease(udid, worker=None)
+
+
+def device_command(udid, action, *args, cancellable=False):
+    code = run_worker(udid, SIMCTL + [action, udid, *args], timeout=120, cancellable=cancellable)
+    if code and not (cancellable and CANCELLED):
+        raise PoolError(f"simctl {action} failed for {udid} (exit {code}).")
+
+
+def clean(udid):
+    with locked():
+        lease = read_state()["leases"][udid]
+        if alive(lease.get("worker"), group=True):
+            raise PoolError(f"Worker for {udid} is still running.")
+    device = inventory().get(udid)
+    if not device or not device["default"]:
+        raise PoolError(f"Cannot locate {udid} in the default device set.")
+    if device["state"] != "Shutdown":
+        device_command(udid, "shutdown")
+        deadline = time.monotonic() + 20
+        while inventory().get(udid, {}).get("state") != "Shutdown":
+            if time.monotonic() >= deadline:
+                raise PoolError(f"{udid} did not shut down.")
+            time.sleep(0.25)
+    device_command(udid, "erase")
+    if inventory().get(udid, {}).get("state") != "Shutdown":
+        raise PoolError(f"{udid} is not shut down after erasing.")
+
+
+def cleanup(udid):
+    started = time.monotonic()
+    try:
+        clean(udid)
+        release(udid)
+    except (PoolError, OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
+        update_lease(udid, blocked=str(error))
+        tell(f"Slot {udid} blocked. {error} Run sim-pool recover {udid} after checking it.")
+        return False
+    tell(f"Cleaned {udid} in {time.monotonic() - started:.1f}s.")
+    return True
+
+
+def recover(udid):
+    udid = str(uuid.UUID(udid)).upper()
+    with locked():
+        state = read_state()
+        lease = state["leases"].get(udid)
+        if udid not in state["devices"] or lease is None:
+            raise PoolError("Recovery requires a recorded lease on a configured device.")
+        if alive(lease["owner"]) or alive(lease.get("worker"), group=True):
+            raise PoolError("The recorded owner or worker is still running.")
+        state["leases"][udid] = dict(lease, owner=os.getpid(), blocked="recovery in progress")
+        save_state(state)
+    return 0 if cleanup(udid) else 1
+
+
+def status():
+    with locked():
+        state = read_state()
+        devices = inventory()
+    active = sum(device["state"] != "Shutdown" for device in devices.values())
+    print(f"{active} visible active simulators; limit {LIMIT} for managed starts")
+    for udid in state["devices"]:
+        device = devices.get(udid, {})
+        lease = state["leases"].get(udid)
+        if lease:
+            label = "blocked" if lease.get("blocked") or not alive(lease["owner"]) else "leased"
+            detail = f"pid {lease['owner']} · {lease['cwd']}"
+            if lease.get("blocked"):
+                detail += f" · {lease['blocked']}"
+        elif device.get("state") == "Shutdown" and device.get("isAvailable"):
+            label, detail = "available", device["name"]
+        else:
+            label, detail = "external or unavailable", device.get("state", "missing")
+        print(f"{udid}  {label}  {detail}")
+
+
+CONTROLLED_FLAGS = {
+    "-destination", "-parallel-testing-enabled", "-parallel-testing-worker-count",
+    "-maximum-parallel-testing-workers", "-maximum-concurrent-test-simulator-destinations",
+    "-maximum-concurrent-test-device-destinations", "-disable-concurrent-destination-testing",
+}
+
+
+def test(args):
+    if args[:1] == ["--"]:
+        args = args[1:]
+    if not args:
+        raise PoolError("Provide Xcode options, for example sim-pool test -scheme MyApp.")
+    options = {arg.split("=", 1)[0] for arg in args}
+    conflicts = options & CONTROLLED_FLAGS
+    if conflicts:
+        raise PoolError(f"sim-pool selects the destination and parallelism. Remove {', '.join(sorted(conflicts))}.")
+    requested_at = time.monotonic()
+    udid = reserve()
+    if udid is None:
+        return 130
+    code = 1
+    try:
+        tell(f"Reserved {udid} after {time.monotonic() - requested_at:.1f}s.")
+        if not CANCELLED:
+            boot_started = time.monotonic()
+            device_command(udid, "bootstatus", "-b", cancellable=True)
+            if not CANCELLED:
+                tell(f"Ready after {time.monotonic() - boot_started:.1f}s.")
+                command = ["xcodebuild", *args, "-destination", f"platform=iOS Simulator,id={udid}",
+                           "-parallel-testing-enabled", "NO"]
+                if "-collect-test-diagnostics" not in options:
+                    command.extend(["-collect-test-diagnostics", "never"])
+                if "-derivedDataPath" not in options and "-xctestrun" not in options:
+                    project = hashlib.sha256(os.fsencode(Path.cwd())).hexdigest()[:16]
+                    command.extend(["-derivedDataPath", str(HOME / "build" / project / udid)])
+                if "-resultBundlePath" not in options:
+                    results = HOME / "results"
+                    results.mkdir(exist_ok=True)
+                    result = results / f"{uuid.uuid4().hex}.xcresult"
+                    tell(f"Results: {result}")
+                    command.extend(["-resultBundlePath", str(result)])
+                action = "test-without-building" if "-xctestrun" in options else "test"
+                code = run_worker(udid, [*command, action], cancellable=True)
+    finally:
+        cleaned = cleanup(udid)
+    if CANCELLED:
+        return 130
+    return code or (0 if cleaned else 1)
+
+
+def main():
+    signal.signal(signal.SIGINT, cancel)
+    signal.signal(signal.SIGTERM, cancel)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("command", choices=["init", "test", "status", "recover"])
+    parser.add_argument("arguments", nargs=argparse.REMAINDER)
+    parsed = parser.parse_args()
+    args = parsed.arguments
+    if parsed.command == "init" and len(args) == LIMIT:
+        initialize(args)
+    elif parsed.command == "test":
+        return test(args)
+    elif parsed.command == "status" and not args:
+        status()
+    elif parsed.command == "recover" and len(args) == 1:
+        return recover(args[0])
+    else:
+        parser.error("Use init UDID UDID, test [Xcode options], status, or recover UDID.")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except (PoolError, OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
+        tell(str(error))
+        sys.exit(1)
