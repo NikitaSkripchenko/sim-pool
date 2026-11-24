@@ -197,6 +197,23 @@ class PoolTest(unittest.TestCase):
         self.assertIn("-collect-test-diagnostics", args)
         self.assertEqual(args[args.index("-collect-test-diagnostics") + 1], "never")
 
+    def test_add_expands_capacity_to_four_and_rejects_duplicates(self):
+        extra = "00000000-0000-4000-8000-000000000004"
+        self.devices.write_text(json.dumps(dict.fromkeys([*IDS, extra], "Shutdown")))
+        for index, udid in enumerate((IDS[2], extra), start=3):
+            result = self.cli("add", udid)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(f"limit {index}", self.cli("status").stdout)
+        self.assertNotEqual(self.cli("add", extra).returncode, 0)
+        release = self.path / "release"
+        runs = [self.start("test", "-scheme", "Demo", FAKE_RELEASE=str(release)) for _ in range(4)]
+        self.wait_for_events(4)
+        self.assertEqual(len({row["id"] for row in self.rows()}), 4)
+        release.touch()
+        for run in runs:
+            _, stderr = run.communicate(timeout=25)
+            self.assertEqual(run.returncode, 0, stderr)
+
     def test_prune_previews_then_deletes_only_requested_devices(self):
         extra = "00000000-0000-4000-8000-000000000004"
         self.devices.write_text(json.dumps(dict.fromkeys([*IDS, extra], "Shutdown")))

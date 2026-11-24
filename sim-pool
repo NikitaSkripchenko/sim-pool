@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Share two disposable iOS simulators across local XCTest runs."""
+"""Share a pool of disposable iOS simulators across local XCTest runs."""
 
 import argparse
 from contextlib import contextmanager
@@ -14,7 +14,7 @@ import sys
 import time
 import uuid
 
-LIMIT = 2
+INITIAL_SIZE = 2
 SIMCTL = ["xcrun", "simctl"]
 HOME = Path(os.environ.get("SIM_POOL_HOME", "~/Library/Application Support/sim-pool")).expanduser().resolve()
 CANCELLED = False
@@ -87,20 +87,36 @@ def inventory():
 
 def initialize(udids):
     udids = [str(uuid.UUID(value)).upper() for value in udids]
-    if len(set(udids)) != LIMIT:
+    if len(set(udids)) != INITIAL_SIZE:
         raise PoolError("Select two different, disposable iOS simulators.")
     with locked():
         if (HOME / "pool.json").exists():
             raise PoolError(f"A pool is already configured at {HOME}.")
         devices = inventory()
         for udid in udids:
-            device = devices.get(udid, {})
-            if not (device.get("default") and device.get("isAvailable")
-                    and device["runtime"].startswith("com.apple.CoreSimulator.SimRuntime.iOS-")
-                    and device["state"] == "Shutdown"):
-                raise PoolError(f"{udid} must be an available, shut-down iOS device in the default set.")
+            validate_slot(udid, devices)
         save_state({"devices": udids, "leases": {}})
     print("Pool configured. Every test run erases its assigned simulator.")
+
+
+def validate_slot(udid, devices):
+    device = devices.get(udid, {})
+    if not (device.get("default") and device.get("isAvailable")
+            and device["runtime"].startswith("com.apple.CoreSimulator.SimRuntime.iOS-")
+            and device["state"] == "Shutdown"):
+        raise PoolError(f"{udid} must be an available, shut-down iOS device in the default set.")
+
+
+def add_slot(value):
+    udid = str(uuid.UUID(value)).upper()
+    with locked():
+        state = read_state()
+        if udid in state["devices"]:
+            raise PoolError(f"{udid} is already in the pool.")
+        validate_slot(udid, inventory())
+        state["devices"].append(udid)
+        save_state(state)
+    print(f"Added {udid}. Limit is now {len(state['devices'])}. Tests erase this device.")
 
 
 def reserve():
@@ -111,10 +127,11 @@ def reserve():
             leases = state["leases"]
             reserved = {udid for udid, lease in leases.items() if not lease.get("blocked")}
             occupied = reserved
-            if len(reserved) < LIMIT:
+            limit = len(state["devices"])
+            if len(reserved) < limit:
                 devices = inventory()
                 occupied = reserved | {udid for udid, device in devices.items() if device["state"] != "Shutdown"}
-                if len(occupied) < LIMIT and not CANCELLED:
+                if len(occupied) < limit and not CANCELLED:
                     for udid in state["devices"]:
                         device = devices.get(udid, {})
                         if udid not in leases and device.get("isAvailable") and device["state"] == "Shutdown":
@@ -260,7 +277,7 @@ def status():
         state = read_state()
         devices = inventory()
     active = sum(device["state"] != "Shutdown" for device in devices.values())
-    print(f"{active} visible active simulators; limit {LIMIT} for managed starts")
+    print(f"{active} visible active simulators; limit {len(state['devices'])} for managed starts")
     for udid in state["devices"]:
         device = devices.get(udid, {})
         lease = state["leases"].get(udid)
@@ -373,12 +390,14 @@ def main():
     signal.signal(signal.SIGINT, cancel)
     signal.signal(signal.SIGTERM, cancel)
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["init", "test", "status", "recover", "prune"])
+    parser.add_argument("command", choices=["init", "add", "test", "status", "recover", "prune"])
     parser.add_argument("arguments", nargs=argparse.REMAINDER)
     parsed = parser.parse_args()
     args = parsed.arguments
-    if parsed.command == "init" and len(args) == LIMIT:
+    if parsed.command == "init" and len(args) == INITIAL_SIZE:
         initialize(args)
+    elif parsed.command == "add" and len(args) == 1:
+        add_slot(args[0])
     elif parsed.command == "test":
         return test(args)
     elif parsed.command == "status" and not args:
@@ -388,7 +407,7 @@ def main():
     elif parsed.command == "prune":
         return prune(args)
     else:
-        parser.error("Use init UDID UDID, test [Xcode options], status, recover UDID, or prune.")
+        parser.error("Use init UDID UDID, add UDID, test [Xcode options], status, recover UDID, or prune.")
     return 0
 
 
