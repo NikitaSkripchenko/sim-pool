@@ -119,25 +119,34 @@ def add_slot(value):
     print(f"Added {udid}. Limit is now {len(state['devices'])}. Tests erase this device.")
 
 
-def reserve():
+def reserve(*, interactive=False, requested=None):
     waiting = False
     while not CANCELLED:
         with locked():
             state = read_state()
             leases = state["leases"]
-            reserved = {udid for udid, lease in leases.items() if not lease.get("blocked")}
-            occupied = reserved
+            devices = inventory()
+            occupied = {udid for udid, lease in leases.items() if not lease.get("blocked")}
+            occupied |= {udid for udid, device in devices.items() if device["state"] != "Shutdown"}
             limit = len(state["devices"])
-            if len(reserved) < limit:
-                devices = inventory()
-                occupied = reserved | {udid for udid, device in devices.items() if device["state"] != "Shutdown"}
-                if len(occupied) < limit and not CANCELLED:
-                    for udid in state["devices"]:
-                        device = devices.get(udid, {})
-                        if udid not in leases and device.get("isAvailable") and device["state"] == "Shutdown":
-                            leases[udid] = {"owner": os.getpid(), "cwd": str(Path.cwd())}
-                            save_state(state)
-                            return udid
+            if requested:
+                device = devices.get(requested, {})
+                if not device.get("default") or not device.get("isAvailable"):
+                    raise PoolError(f"{requested} must be an available device in the default set.")
+            for udid in [requested] if requested else state["devices"]:
+                device = devices.get(udid, {})
+                external = udid not in state["devices"]
+                allowed_states = {"Shutdown", "Booted"} if external else {"Shutdown"}
+                if (udid not in leases and device.get("isAvailable") and not CANCELLED
+                        and device["state"] in allowed_states and len(occupied | {udid}) <= limit):
+                    leases[udid] = {"owner": os.getpid(), "cwd": str(Path.cwd())}
+                    if interactive:
+                        leases[udid]["interactive"] = True
+                    if external:
+                        leases[udid]["external"] = True
+                        leases[udid]["was_booted"] = device["state"] == "Booted"
+                    save_state(state)
+                    return udid
             if not waiting:
                 tell(f"Waiting for a slot ({len(occupied)} active or reserved devices). Ctrl-C cancels.")
                 waiting = True
@@ -191,13 +200,13 @@ def stop_worker(process):
     raise PoolError(f"Worker group {process.pid} is still active.")
 
 
-def run_worker(udid, command, *, timeout=None, cancellable=False):
+def run_worker(udid, command, *, timeout=None, cancellable=False, stdout=None):
     reader, writer = os.pipe()
     process = None
     try:
         process = subprocess.Popen(
             [sys.executable, "-c", WORKER, str(reader), *command],
-            pass_fds=(reader,), start_new_session=True,
+            pass_fds=(reader,), start_new_session=True, stdout=stdout,
         )
         update_lease(udid, worker=process.pid)
         os.write(writer, b"1")
@@ -219,8 +228,9 @@ def run_worker(udid, command, *, timeout=None, cancellable=False):
             update_lease(udid, worker=None)
 
 
-def device_command(udid, action, *args, cancellable=False):
-    code = run_worker(udid, SIMCTL + [action, udid, *args], timeout=120, cancellable=cancellable)
+def device_command(udid, action, *args, cancellable=False, stdout=None):
+    code = run_worker(udid, SIMCTL + [action, udid, *args], timeout=120,
+                      cancellable=cancellable, stdout=stdout)
     if code and not (cancellable and CANCELLED):
         raise PoolError(f"simctl {action} failed for {udid} (exit {code}).")
 
@@ -233,6 +243,8 @@ def clean(udid):
     device = inventory().get(udid)
     if not device or not device["default"]:
         raise PoolError(f"Cannot locate {udid} in the default device set.")
+    if lease.get("external") and lease.get("was_booted"):
+        return
     if device["state"] != "Shutdown":
         device_command(udid, "shutdown")
         deadline = time.monotonic() + 20
@@ -240,9 +252,10 @@ def clean(udid):
             if time.monotonic() >= deadline:
                 raise PoolError(f"{udid} did not shut down.")
             time.sleep(0.25)
-    device_command(udid, "erase")
+    if not lease.get("external"):
+        device_command(udid, "erase")
     if inventory().get(udid, {}).get("state") != "Shutdown":
-        raise PoolError(f"{udid} is not shut down after erasing.")
+        raise PoolError(f"{udid} is not shut down after cleanup.")
 
 
 def cleanup(udid):
@@ -263,8 +276,8 @@ def recover(udid):
     with locked():
         state = read_state()
         lease = state["leases"].get(udid)
-        if udid not in state["devices"] or lease is None:
-            raise PoolError("Recovery requires a recorded lease on a configured device.")
+        if lease is None or (udid not in state["devices"] and not lease.get("external")):
+            raise PoolError("Recovery requires a recorded pool or interactive lease.")
         if alive(lease["owner"]) or alive(lease.get("worker"), group=True):
             raise PoolError("The recorded owner or worker is still running.")
         state["leases"][udid] = dict(lease, owner=os.getpid(), blocked="recovery in progress")
@@ -278,7 +291,7 @@ def status():
         devices = inventory()
     active = sum(device["state"] != "Shutdown" for device in devices.values())
     print(f"{active} visible active simulators; limit {len(state['devices'])} for managed starts")
-    for udid in state["devices"]:
+    for udid in dict.fromkeys([*state["devices"], *state["leases"]]):
         device = devices.get(udid, {})
         lease = state["leases"].get(udid)
         if lease:
@@ -386,11 +399,33 @@ def test(args):
     return code or (0 if cleaned else 1)
 
 
+def hold(value=None):
+    requested = str(uuid.UUID(value)).upper() if value else None
+    udid = reserve(interactive=True, requested=requested)
+    if udid is None:
+        return 130
+    ready = False
+    try:
+        if not CANCELLED:
+            device_command(udid, "bootstatus", "-b", cancellable=True, stdout=sys.stderr)
+        if not CANCELLED:
+            update_lease(udid, ready=True)
+            ready = True
+            print(udid, flush=True)
+            tell("Interactive slot ready. Ctrl-C releases it.")
+            while not CANCELLED:
+                time.sleep(0.25)
+    finally:
+        update_lease(udid, ready=False)
+        cleaned = cleanup(udid)
+    return (0 if ready else 130) if cleaned else 1
+
+
 def main():
     signal.signal(signal.SIGINT, cancel)
     signal.signal(signal.SIGTERM, cancel)
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["init", "add", "test", "status", "recover", "prune"])
+    parser.add_argument("command", choices=["init", "add", "test", "hold", "status", "recover", "prune"])
     parser.add_argument("arguments", nargs=argparse.REMAINDER)
     parsed = parser.parse_args()
     args = parsed.arguments
@@ -400,6 +435,8 @@ def main():
         add_slot(args[0])
     elif parsed.command == "test":
         return test(args)
+    elif parsed.command == "hold" and len(args) <= 1:
+        return hold(*args)
     elif parsed.command == "status" and not args:
         status()
     elif parsed.command == "recover" and len(args) == 1:
@@ -407,7 +444,7 @@ def main():
     elif parsed.command == "prune":
         return prune(args)
     else:
-        parser.error("Use init UDID UDID, add UDID, test [Xcode options], status, recover UDID, or prune.")
+        parser.error("Use init UDID UDID, add UDID, test [Xcode options], hold [UDID], status, recover UDID, or prune.")
     return 0
 
 

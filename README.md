@@ -37,7 +37,7 @@ xcodebuild build-for-testing -scheme MyApp -destination 'generic/platform=iOS Si
 sim-pool test -xctestrun /absolute/path/to/MyApp.xctestrun
 ```
 
-Use Ctrl-C to cancel a wait or active run. If cleanup fails or the runner is forcibly terminated, inspect `sim-pool status`. Once the recorded processes have exited, `sim-pool recover UDID` retries shutdown and erase for that slot. Recovery erases the named simulator.
+Use Ctrl-C to cancel a wait or active run. If cleanup fails or the runner is forcibly terminated, inspect `sim-pool status`. Once the recorded processes have exited, `sim-pool recover UDID` retries shutdown and erase for that slot. Recovery erases a pool slot. External interactive devices keep their data.
 
 ## Expand the pool
 
@@ -62,17 +62,26 @@ known simulator-mutating tools. Use `sim-pool test` for XCTest. Read-only
 inventory and standard builds remain available. Use Terminal for manual
 administration of special devices.
 
-For interactive work on a dedicated simulator outside the pool, allow its UDID
-in the Claude hook:
+For interactive work, start a lease and keep it running while you use the
+simulator tools:
 
 ```sh
-./install-sim-pool --hooks --interactive-device SPECIAL_DEVICE_UDID
+sim-pool hold
+sim-pool hold EXISTING_DEVICE_UDID
 ```
 
-Repeat `--interactive-device` to allow multiple devices. Pass the approved UDID
-in every Claude simulator control call. The exception covers interactive
-actions such as screenshots, taps, typing and launching apps. It leaves
-direct XCTest and simulator deletion blocked.
+Use one of these commands per session. The first chooses a free pool slot.
+The second requests a specific existing device, for example a dedicated Duo.
+Both count toward the visible Mac limit. Pass the printed UDID explicitly to
+Claude simulator calls (`device`) or supported Xcode MCP calls (`simulatorId`).
+The hook checks for a ready, live interactive lease at that UDID. It does not
+authenticate the agent that holds the lease. Creation, cloning and direct
+XCTest remain blocked through supported agent tool paths. Manage devices in
+your own Terminal.
+
+Ctrl-C releases the lease. Pool slots are erased. An existing device outside
+the pool keeps its data and its starting boot state. Reinstall the hooks with
+`./install-sim-pool --hooks` to remove any old static device exception.
 
 The guard only sees tool calls surfaced by the client. It does not govern
 manual Xcode or Simulator.app operations or indirect commands hidden in

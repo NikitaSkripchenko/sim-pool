@@ -214,6 +214,36 @@ class PoolTest(unittest.TestCase):
             _, stderr = run.communicate(timeout=25)
             self.assertEqual(run.returncode, 0, stderr)
 
+    def test_hold_enables_claude_interaction_until_cleanup(self):
+        hook = ROOT / "sim-pool-hook"
+        for arguments in ((), (IDS[2],)):
+            with self.subTest(arguments=arguments):
+                run = self.start("hold", *arguments, **({"FAIL_ERASE": "1"} if arguments else {}))
+                with selectors.DefaultSelector() as selector:
+                    selector.register(run.stdout, selectors.EVENT_READ)
+                    self.assertTrue(selector.select(timeout=15), "No interactive lease")
+                    udid = run.stdout.readline().strip()
+                self.assertIn(udid, IDS)
+                event = json.dumps({"tool_name": "mcp__Claude_Code_iOS_Simulator__control",
+                                    "tool_input": {"action": "screenshot", "device": udid}})
+                def decision(payload=event):
+                    return subprocess.run([hook], input=payload, env=self.env, text=True,
+                                          capture_output=True, timeout=10).returncode
+                self.assertEqual(decision(), 0)
+                self.assertEqual(decision(json.dumps({
+                    "tool_name": "mcp__Claude_Code_iOS_Simulator__control",
+                    "tool_input": {"action": "create", "device": udid},
+                })), 2)
+                self.assertEqual(decision(json.dumps({
+                    "tool_name": "mcp__xcodebuildmcp__screenshot",
+                    "tool_input": {"simulatorId": udid},
+                })), 0)
+                run.send_signal(signal.SIGINT)
+                run.communicate(timeout=15)
+                self.assertEqual(run.returncode, 0)
+                self.assertEqual(decision(), 2)
+                self.assertEqual(json.loads(self.devices.read_text())[udid], "Shutdown")
+
     def test_prune_previews_then_deletes_only_requested_devices(self):
         extra = "00000000-0000-4000-8000-000000000004"
         self.devices.write_text(json.dumps(dict.fromkeys([*IDS, extra], "Shutdown")))

@@ -9,7 +9,6 @@ import shlex
 import subprocess
 import sys
 import tempfile
-import uuid
 
 
 MARKER = "## Local iOS simulator pool"
@@ -36,7 +35,7 @@ def add_instructions(path, source, *, claude=False):
     )
     if claude:
         block += (
-            "\n\nFor interactive simulator work in Claude Desktop, ask before using an "
+            "\n\nFor interactive simulator work in Claude Desktop, use sim-pool hold. Ask before using an "
             "unmanaged simulator. Do not attach to either pool device unless the "
             "current task holds its reservation."
         )
@@ -64,15 +63,14 @@ def create_pool(source, state, device, runtime):
                 subprocess.run(["xcrun", "simctl", "delete", udid], check=False)
 
 
-def add_hook(path, source, interactive_devices=None):
+def add_hook(path, source):
     path = path.resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
     config = json.loads(path.read_text()) if path.exists() else {}
     hooks = config.setdefault("hooks", {}).setdefault("PreToolUse", [])
-    arguments = [f"--interactive-device={udid}" for udid in interactive_devices or ()]
     entry = {
         "matcher": "^(Bash|exec_command|mcp__(Claude_Code_iOS_Simulator|xcodebuildmcp|mobilebuildmcp)__.*)$",
-        "hooks": [{"type": "command", "command": shlex.join([sys.executable, str(source), *arguments]), "timeout": 5}],
+        "hooks": [{"type": "command", "command": shlex.join([sys.executable, str(source)]), "timeout": 5}],
     }
     def is_managed(hook):
         if hook.get("type") != "command":
@@ -84,8 +82,6 @@ def add_hook(path, source, interactive_devices=None):
         return len(command) >= 2 and command[1] == str(source)
 
     if entry in hooks:
-        return
-    if interactive_devices is None and any(is_managed(hook) for group in hooks for hook in group["hooks"]):
         return
     for group in hooks[:]:
         others = [hook for hook in group["hooks"] if not is_managed(hook)]
@@ -111,11 +107,7 @@ def main():
     parser.add_argument("--device", default="com.apple.CoreSimulator.SimDeviceType.iPhone-17")
     parser.add_argument("--runtime", default="com.apple.CoreSimulator.SimRuntime.iOS-27-0")
     parser.add_argument("--hooks", action="store_true", help="Install Codex and Claude PreToolUse guards.")
-    parser.add_argument("--interactive-device", action="append", type=uuid.UUID,
-                        help="Allow Claude to control this dedicated non-pool simulator by UDID.")
     options = parser.parse_args()
-    if options.interactive_device and not options.hooks:
-        parser.error("--interactive-device requires --hooks.")
 
     source = (options.repo / "sim-pool").resolve(strict=True)
     home = Path.home()
@@ -144,14 +136,8 @@ def main():
         print(f"Configured {path}")
     if options.hooks:
         hook = source.with_name("sim-pool-hook").resolve(strict=True)
-        approved = None
-        if options.interactive_device:
-            approved = sorted({str(device).upper() for device in options.interactive_device})
-            registered = set(json.loads((state / "pool.json").read_text())["devices"])
-            if registered.intersection(approved):
-                raise ValueError("Interactive exceptions require a dedicated device outside Sim Pool.")
-        for path, devices in ((codex / "hooks.json", None), (claude / "settings.json", approved)):
-            add_hook(path, hook, devices)
+        for path in (codex / "hooks.json", claude / "settings.json"):
+            add_hook(path, hook)
             print(f"Configured simulator hook in {path}")
 
 

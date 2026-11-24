@@ -3,7 +3,8 @@
 
 import argparse
 import json
-from pathlib import PurePath
+import os
+from pathlib import Path, PurePath
 import re
 import shlex
 import sys
@@ -14,14 +15,16 @@ SIMCTL_ACTIONS = {
     "install", "uninstall", "launch", "terminate", "spawn",
 }
 MCP_ACTIONS = {
-    "batch", "test_sim", "build_run_sim", "boot_sim", "launch_app_sim", "install_app_sim",
-    "debug_attach_sim", "open_sim", "shutdown_sim", "erase_sims", "stop_app_sim",
+    "batch", "test_sim", "build_run_sim", "boot_sim", "shutdown_sim", "erase_sims",
+    "create_sim", "clone_sim", "delete_sim", "rename_sim",
 }
-CLAUDE_INTERACTIVE_ACTIONS = {
-    "attach", "button", "launch", "open_url", "posture", "press_key",
-    "screenshot", "set_appearance", "set_keyboard", "set_posture", "swipe",
-    "tap", "text", "touch_path", "wait", "zoom",
+MCP_LEASE_ACTIONS = {
+    "launch_app_sim", "install_app_sim", "debug_attach_sim", "open_sim", "stop_app_sim",
+    "tap", "swipe", "screenshot", "snapshot_ui", "type_text", "button", "gesture",
+    "drag", "key_press", "key_sequence", "long_press", "record_sim_video",
+
 }
+CLAUDE_ADMIN_ACTIONS = {"create", "clone", "delete", "erase", "shutdown", "reset", "rename"}
 ASSIGNMENT = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*=")
 SEPARATORS = frozenset(";&|()")
 
@@ -38,6 +41,8 @@ def is_simulator_command(words):
             if argument in {"simctl", "xcodebuild"}:
                 program, args = argument, args[index + 1:]
                 break
+    if program == "sim-pool" and args and args[0] in {"init", "add", "prune"}:
+        return True
     if program == "xcodebuild":
         values = iter(args)
         for arg in values:
@@ -72,7 +77,20 @@ def blocks_shell(command):
     return False
 
 
-def blocks(event, interactive_devices):
+def interactive_lease(device):
+    try:
+        udid = str(uuid.UUID(device)).upper()
+        home = Path(os.environ.get("SIM_POOL_HOME", "~/Library/Application Support/sim-pool")).expanduser()
+        lease = json.loads((home / "pool.json").read_text())["leases"].get(udid, {})
+        if not (lease.get("interactive") and lease.get("ready") and not lease.get("blocked")):
+            return False
+        os.kill(lease["owner"], 0)
+        return True
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return False
+
+
+def blocks(event):
     name = event.get("tool_name", "").lower()
     inputs = event.get("tool_input") or {}
     if name in {"bash", "exec_command"}:
@@ -82,18 +100,21 @@ def blocks(event, interactive_devices):
         if action in {"list", "status", "devices", "list_devices"}:
             return False
         device = inputs.get("device")
-        return not (isinstance(device, str) and device.upper() in interactive_devices
-                    and action in CLAUDE_INTERACTIVE_ACTIONS)
+        return action in CLAUDE_ADMIN_ACTIONS or not interactive_lease(device)
     server, _, action = name.removeprefix("mcp__").partition("__")
-    return server in {"xcodebuildmcp", "mobilebuildmcp"} and action in MCP_ACTIONS
+    if server in {"xcodebuildmcp", "mobilebuildmcp"}:
+        return action in MCP_ACTIONS or (action in MCP_LEASE_ACTIONS
+                                        and not interactive_lease(inputs.get("simulatorId")))
+    return False
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--interactive-device", action="append", default=[], type=uuid.UUID)
-    approved = {str(device).upper() for device in parser.parse_args().interactive_device}
-    if blocks(json.load(sys.stdin), approved):
+    # Accept old installed command lines until the user reruns the installer.
+    parser.add_argument("--interactive-device", action="append", help=argparse.SUPPRESS)
+    parser.parse_args()
+    if blocks(json.load(sys.stdin)):
         print("Use sim-pool test for XCTest and sim-pool status for capacity. "
-              "For Claude simulator interaction, pass the approved device UDID explicitly. "
+              "For interactive work start sim-pool hold [UDID] and pass the leased UDID. "
               "Use Terminal for simulator administration.", file=sys.stderr)
         sys.exit(2)

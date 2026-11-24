@@ -20,6 +20,8 @@ class HookTest(unittest.TestCase):
             "xcrun simctl --set=testing boot UDID",
             "/usr/bin/xcrun simctl bootstatus UDID -b",
             "xcrun simctl delete UDID",
+            "xcrun simctl create Name Type Runtime",
+            "sim-pool add UDID",
         ):
             with self.subTest(command=command):
                 result = self.call("Bash", command=command)
@@ -48,13 +50,10 @@ class HookTest(unittest.TestCase):
                 self.assertEqual(self.call(name, **arguments).returncode, expected)
 
 
-    def test_claude_interaction_requires_explicit_approved_device(self):
+    def test_legacy_allowlist_does_not_grant_access_without_lease(self):
         server = "mcp__Claude_Code_iOS_Simulator__control"
         duo = "58039C64-5C2E-4D1D-848A-417DFBC183A3"
-        for action in ("attach", "launch", "tap", "screenshot", "text", "open_url", "button"):
+        for action in ("attach", "tap", "screenshot", "open_url"):
             with self.subTest(action=action):
-                self.assertEqual(self.call(server, approved=[duo], device=duo.lower(),
-                                           action=action).returncode, 0)
-        self.assertEqual(self.call(server, approved=[duo], action="tap").returncode, 2)
-        self.assertEqual(self.call(server, approved=[duo], device="other", action="tap").returncode, 2)
-        self.assertEqual(self.call(server, approved=[duo], device=duo, action="erase").returncode, 2)
+                self.assertEqual(self.call(server, approved=[duo], device=duo,
+                                           action=action).returncode, 2)
