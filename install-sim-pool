@@ -1,0 +1,102 @@
+#!/usr/bin/env python3
+"""Install the local Sim Pool and its Codex and Claude Code instructions."""
+
+import argparse
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+
+MARKER = "## Local iOS simulator pool"
+
+
+def run(*args, capture=False):
+    result = subprocess.run(args, check=True, text=True, stdout=subprocess.PIPE if capture else None)
+    return result.stdout.strip() if capture else None
+
+
+def check_link(path, source):
+    if os.path.lexists(path) and not (path.is_symlink() and path.resolve() == source):
+        raise ValueError(f"Existing command at {path}. Resolve it before installing.")
+
+
+def add_instructions(path, source, *, claude=False):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    block = (
+        f"{MARKER}\n\n"
+        f"For local iOS XCTest, use `{source} test -scheme <scheme>`. "
+        "Pass project, workspace, or prebuilt test options as needed. "
+        f"Use `{source} status` to check capacity. "
+        "Wait if the pool is full. Leave externally started simulators to their owners."
+    )
+    if claude:
+        block += (
+            "\n\nFor interactive simulator work in Claude Desktop, ask before using an "
+            "unmanaged simulator. Do not attach to either pool device unless the "
+            "current task holds its reservation."
+        )
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    with os.fdopen(fd, "r+", encoding="utf-8") as file:
+        existing = file.read()
+        if MARKER not in existing.splitlines():
+            if existing:
+                file.write("\n" if existing.endswith("\n") else "\n\n")
+            file.write(block + "\n")
+
+
+def create_pool(source, state, device, runtime):
+    config = state / "pool.json"
+    if config.exists():
+        return
+    created = []
+    try:
+        for name in ("Sim Pool A", "Sim Pool B"):
+            created.append(run("xcrun", "simctl", "create", name, device, runtime, capture=True))
+        run(str(source), "init", *created)
+    finally:
+        if not config.exists():
+            for udid in created:
+                subprocess.run(["xcrun", "simctl", "delete", udid], check=False)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parent)
+    parser.add_argument("--device", default="com.apple.CoreSimulator.SimDeviceType.iPhone-17")
+    parser.add_argument("--runtime", default="com.apple.CoreSimulator.SimRuntime.iOS-27-0")
+    options = parser.parse_args()
+
+    source = (options.repo / "sim-pool").resolve(strict=True)
+    home = Path.home()
+    state = home / "Library/Application Support/sim-pool"
+    source_env = os.environ.get("SIM_POOL_HOME")
+    if source_env and Path(source_env).expanduser().resolve() != state:
+        raise ValueError("Unset SIM_POOL_HOME for the shared installation.")
+    link = home / ".local/bin/sim-pool"
+    check_link(link, source)
+    inventory = json.loads(run("xcrun", "simctl", "list", "devices", "--json", capture=True))
+    active = sum(device["state"] != "Shutdown" for group in inventory["devices"].values() for device in group)
+    print(f"Found {active} active devices in the default set.", flush=True)
+    create_pool(source, state, options.device, options.runtime)
+    run(str(source), "status")
+
+    link.parent.mkdir(parents=True, exist_ok=True)
+    if not link.is_symlink():
+        link.symlink_to(source)
+    codex = Path(os.environ.get("CODEX_HOME", home / ".codex")).expanduser()
+    codex_path = codex / "AGENTS.override.md"
+    if not codex_path.is_file():
+        codex_path = codex / "AGENTS.md"
+    claude = Path(os.environ.get("CLAUDE_CONFIG_DIR", home / ".claude")).expanduser()
+    for path, is_claude in ((codex_path, False), (claude / "CLAUDE.md", True)):
+        add_instructions(path, source, claude=is_claude)
+        print(f"Configured {path}")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (OSError, ValueError, subprocess.CalledProcessError) as error:
+        sys.exit(f"install-sim-pool: {error}")

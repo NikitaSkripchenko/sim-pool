@@ -6,6 +6,10 @@ Run local iOS XCTest jobs on two shared, disposable simulators. The third job wa
 
 Use macOS, Xcode and Python 3.9 or newer. Keep one pool per macOS user so Codex, Claude and terminal sessions share the same two slots.
 
+Run `./install-sim-pool` from this checkout. On first install it creates two dedicated iPhone 17 simulators on iOS 27.0, adds a command symlink and appends user instructions for Codex and Claude Code. For a different installed device type or runtime, pass `--device` or `--runtime` with the corresponding CoreSimulator identifier. Subsequent installs reuse the configured devices. Open new agent sessions after installation.
+
+To use two existing disposable devices, set up their UDIDs manually:
+
 ```sh
 mkdir -p ~/.local/bin
 ln -s "$PWD/sim-pool" ~/.local/bin/sim-pool
@@ -13,7 +17,7 @@ xcrun simctl list devices available
 sim-pool init FIRST_UDID SECOND_UDID
 ```
 
-Run this from the repository root. Add `~/.local/bin` to your `PATH` if needed. Pick two available, shut-down iOS devices from the default set that are safe to erase. Use freshly configured devices if your first job needs a clean simulator. Initialization only records the two UDIDs.
+Run commands from the repository root. Add `~/.local/bin` to your `PATH` if needed. Pick two available, shut-down iOS devices from the default set that are safe to erase. Use freshly configured devices if your first job needs a clean simulator. Initialization only records the two UDIDs.
 
 ## Run tests
 
