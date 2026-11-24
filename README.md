@@ -2,11 +2,47 @@
 
 Run local iOS XCTest jobs on a shared pool of disposable simulators. Jobs wait at the configured limit. The runner chooses a UDID, streams Xcode output, then erases and shuts down its device.
 
-## Set up once
+## Requirements
 
-Use macOS, Xcode and Python 3.9 or newer. Keep one pool per macOS user so Codex, Claude and terminal sessions share the same two slots.
+- macOS with Xcode selected as the active developer directory.
+- Python 3.9 or later available as `python3`.
+- An installed iOS Simulator runtime. The default setup uses an iPhone 17
+  device type and the iOS 27.0 runtime.
 
-Run `./install-sim-pool` from this checkout. On first install it creates two dedicated iPhone 17 simulators on iOS 27.0, adds a command symlink and appends user instructions for Codex and Claude Code. For a different installed device type or runtime, pass `--device` or `--runtime` with the corresponding CoreSimulator identifier. Subsequent installs reuse the configured devices. Open new agent sessions after installation.
+Check the local tools and available Simulator identifiers:
+
+```sh
+xcodebuild -version
+python3 --version
+xcrun simctl list devicetypes
+xcrun simctl list runtimes
+```
+
+## Install
+
+```sh
+git clone https://github.com/NikitaSkripchenko/sim-pool.git
+cd sim-pool
+./install-sim-pool
+"$HOME/.local/bin/sim-pool" status
+```
+
+Expect two available devices, `Sim Pool A` and `Sim Pool B`. The installer
+creates them once, links the CLI into `~/.local/bin`, and adds user-level
+instructions for Codex and Claude Code. Re-running it uses the existing pool.
+Keep the checkout in place because the installed command points to it.
+
+If the default device type or runtime is unavailable, pass the identifiers
+from the lists above:
+
+```sh
+./install-sim-pool --device DEVICE_TYPE_IDENTIFIER --runtime RUNTIME_IDENTIFIER
+```
+
+Add `~/.local/bin` to your shell's `PATH` to use the shorter `sim-pool`
+command in the examples below. Open fresh agent sessions after installation.
+To enforce the workflow on supported agent tool calls, see
+[Guard agent tool calls](#guard-agent-tool-calls).
 
 To use two existing disposable devices, set up their UDIDs manually:
 
@@ -17,7 +53,7 @@ xcrun simctl list devices available
 sim-pool init FIRST_UDID SECOND_UDID
 ```
 
-Run commands from the repository root. Add `~/.local/bin` to your `PATH` if needed. Pick two available, shut-down iOS devices from the default set that are safe to erase. Use freshly configured devices if your first job needs a clean simulator. Initialization only records the two UDIDs.
+Run commands from the repository root. Pick two available, shut-down iOS devices from the default set that are safe to erase. Use freshly configured devices if your first job needs a clean simulator. Initialization only records the two UDIDs.
 
 ## Run tests
 
@@ -111,6 +147,14 @@ Runner processes coordinate through a local file lock and a record of the curren
 The runner counts devices in the default and Xcode parallel-testing sets. A visible external boot takes capacity. Direct calls to Xcode or Simulator can still bypass the shared limit, and custom device sets or other macOS users are outside this inventory.
 
 By default, the state, per-project/per-device build caches and test results live in `~/Library/Application Support/sim-pool`. Use the same location across sessions. The CLI has no daemon and needs no SimSlim install. When no runs are active, old result bundles and build caches can be removed independently of the pool state.
+
+## Troubleshooting
+
+| Symptom | What to check |
+| --- | --- |
+| A run is waiting with both pool devices shown as available | Run `sim-pool status`. Simulators already running outside the pool count toward the limit. Shut down any external devices you are finished using. |
+| Simulator controls are blocked | Start `sim-pool hold`, wait for the UDID, and pass it to the tool. Keep the lease running while you interact with the device. |
+| A slot stays blocked after a crash | Check the recorded process in `sim-pool status`. After it exits, run `sim-pool recover UDID` to retry cleanup. |
 
 ## Develop
 
