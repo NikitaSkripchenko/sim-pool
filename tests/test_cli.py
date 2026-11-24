@@ -200,6 +200,15 @@ class PoolTest(unittest.TestCase):
         self.assertIn("-destination", result.stderr)
         self.assertEqual(self.rows(), [])
 
+    def test_rejects_project_options_with_prebuilt_tests_before_boot(self):
+        for flag in ("-scheme", "-project", "-workspace"):
+            with self.subTest(flag=flag):
+                result = self.cli("test", "-xctestrun", "Demo.xctestrun", flag, "Demo")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(flag, result.stderr)
+                self.assertNotIn("Reserved", result.stderr)
+        self.assertEqual(self.rows(), [])
+
     def test_uses_prebuilt_test_action(self):
         result = self.cli("test", "-xctestrun", "Demo.xctestrun")
         self.assertEqual(result.returncode, 0, result.stderr)

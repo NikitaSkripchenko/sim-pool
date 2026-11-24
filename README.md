@@ -30,7 +30,7 @@ sim-pool status
 
 Pass Xcode options such as `-project`, `-workspace` or `-only-testing` as usual. The runner selects the action and destination and disables parallel test workers. It prints the waiting, boot and cleanup times. Test output streams directly, and the result bundle stays on the Mac after cleanup. By default, failed tests skip verbose simulator diagnostics to avoid long collection delays. To collect them explicitly, pass `-collect-test-diagnostics on-failure`.
 
-For longer builds, build first and give the runner the compiled test bundle. The slot is then occupied only while the simulator is in use.
+For longer builds, build first and give the runner the compiled test bundle. The slot is then occupied only while the simulator is in use. Pass the `-xctestrun` path without `-scheme`, `-project` or `-workspace`.
 
 ```sh
 xcodebuild build-for-testing -scheme MyApp -destination 'generic/platform=iOS Simulator'

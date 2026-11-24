@@ -292,6 +292,8 @@ def test(args):
     conflicts = options & CONTROLLED_FLAGS
     if conflicts:
         raise PoolError(f"sim-pool selects the destination and parallelism. Remove {', '.join(sorted(conflicts))}.")
+    if "-xctestrun" in options and (project_flags := options & {"-scheme", "-project", "-workspace"}):
+        raise PoolError(f"With -xctestrun, remove {', '.join(sorted(project_flags))}.")
     requested_at = time.monotonic()
     udid = reserve()
     if udid is None:
