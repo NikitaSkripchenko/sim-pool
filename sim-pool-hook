@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+"""Steer known simulator tool calls through Sim Pool."""
+
+import json
+from pathlib import PurePath
+import re
+import shlex
+import sys
+
+SIMCTL_ACTIONS = {
+    "boot", "bootstatus", "create", "clone", "delete", "erase", "shutdown",
+    "install", "uninstall", "launch", "terminate", "spawn",
+}
+MCP_ACTIONS = {
+    "batch", "test_sim", "build_run_sim", "boot_sim", "launch_app_sim", "install_app_sim",
+    "debug_attach_sim", "open_sim", "shutdown_sim", "erase_sims", "stop_app_sim",
+}
+ASSIGNMENT = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*=")
+SEPARATORS = frozenset(";&|()")
+
+
+def is_simulator_command(words):
+    while words and (ASSIGNMENT.match(words[0]) or PurePath(words[0]).name in {"env", "command", "exec", "time", "noglob"}):
+        words = words[1:]
+    if not words:
+        return False
+    program, *args = words
+    program = PurePath(program).name
+    if program == "xcrun":
+        for index, argument in enumerate(args):
+            if argument in {"simctl", "xcodebuild"}:
+                program, args = argument, args[index + 1:]
+                break
+    if program == "xcodebuild":
+        values = iter(args)
+        for arg in values:
+            if arg in {"-scheme", "-project", "-workspace", "-target", "-configuration", "-destination"}:
+                next(values, None)
+            elif arg in {"test", "test-without-building"}:
+                return True
+        return False
+    if program == "simctl":
+        while args and args[0].split("=", 1)[0] in {"--set", "--profiles"}:
+            args = args[1:] if "=" in args[0] else args[2:]
+        return bool(args and args[0] in SIMCTL_ACTIONS)
+    return False
+
+
+def blocks_shell(command):
+    for line in command.splitlines():
+        lexer = shlex.shlex(line, posix=True, punctuation_chars=";&|()")
+        lexer.whitespace_split = True
+        try:
+            tokens = list(lexer)
+        except ValueError:
+            continue
+        words = []
+        for token in [*tokens, ";"]:
+            if token and all(char in SEPARATORS for char in token):
+                if is_simulator_command(words):
+                    return True
+                words = []
+            else:
+                words.append(token)
+    return False
+
+
+def blocks(event):
+    name = event.get("tool_name", "").lower()
+    inputs = event.get("tool_input") or {}
+    if name in {"bash", "exec_command"}:
+        return blocks_shell(inputs.get("command", inputs.get("cmd", "")))
+    if name == "mcp__claude_code_ios_simulator__control":
+        return inputs.get("action") not in {"list", "status", "devices", "list_devices"}
+    server, _, action = name.removeprefix("mcp__").partition("__")
+    return server in {"xcodebuildmcp", "mobilebuildmcp"} and action in MCP_ACTIONS
+
+
+if __name__ == "__main__":
+    if blocks(json.load(sys.stdin)):
+        print("Use sim-pool test for XCTest and sim-pool status for capacity. "
+              "Use Terminal for manual simulator administration.", file=sys.stderr)
+        sys.exit(2)

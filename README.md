@@ -1,6 +1,6 @@
 # Sim Pool
 
-Run local iOS XCTest jobs on two shared, disposable simulators. The third job waits. The runner chooses a UDID, streams Xcode output, then erases and shuts down its device.
+Run local iOS XCTest jobs on a shared pool of disposable simulators. Jobs wait at the configured limit. The runner chooses a UDID, streams Xcode output, then erases and shuts down its device.
 
 ## Set up once
 
@@ -38,6 +38,34 @@ sim-pool test -xctestrun /absolute/path/to/MyApp.xctestrun
 ```
 
 Use Ctrl-C to cancel a wait or active run. If cleanup fails or the runner is forcibly terminated, inspect `sim-pool status`. Once the recorded processes have exited, `sim-pool recover UDID` retries shutdown and erase for that slot. Recovery erases the named simulator.
+
+## Expand the pool
+
+Create a dedicated iOS simulator in Xcode or with `xcrun simctl create`, then
+register its UDID while it is shut down:
+
+```sh
+sim-pool add NEW_DEVICE_UDID
+sim-pool status
+```
+
+Each addition raises the limit by one. Visible external devices, such as a
+manually started Duo, still take one place in that limit. Registered devices
+are erased after tests. Existing reservations continue to run during expansion.
+
+## Guard agent tool calls
+
+Run `./install-sim-pool --hooks` to append a global PreToolUse guard for Codex
+and Claude Code. Preserve other hooks and open fresh sessions. If Codex asks
+to trust the hook, review it via `/hooks`. The guard rejects direct XCTest and
+known simulator-mutating tools. Use `sim-pool test` for XCTest. Read-only
+inventory and standard builds remain available. Use Terminal for manual
+administration of special devices.
+
+The guard only sees tool calls surfaced by the client. It does not govern
+manual Xcode or Simulator.app operations or indirect commands hidden in
+scripts. To remove it, remove its PreToolUse entry pointing to
+`sim-pool-hook` in each client configuration.
 
 ## Remove retired simulators
 

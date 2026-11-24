@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -37,6 +38,10 @@ class InstallTest(unittest.TestCase):
             codex.mkdir()
             override = codex / "AGENTS.override.md"
             override.write_text("Existing preferences.\n")
+            claude_home = home / ".claude"
+            claude_home.mkdir()
+            settings = claude_home / "settings.json"
+            settings.write_text('{"hooks":{"PreToolUse":[{"matcher":"Edit","hooks":[]}]}}')
             env = dict(os.environ, HOME=str(home), CODEX_HOME=str(codex),
                        CLAUDE_CONFIG_DIR=str(home / ".claude"),
                        FAKE_INVENTORY=str(home / "devices"),
@@ -46,7 +51,7 @@ class InstallTest(unittest.TestCase):
             installer = ROOT / "install-sim-pool"
             self.assertTrue(installer.is_file(), "Repository installer is missing")
             for _ in range(2):
-                result = subprocess.run([installer], env=env, capture_output=True,
+                result = subprocess.run([installer, "--hooks"], env=env, capture_output=True,
                                         text=True, timeout=20)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn("Sim Pool A", result.stdout)
@@ -59,3 +64,9 @@ class InstallTest(unittest.TestCase):
             self.assertEqual(claude.count("## Local iOS simulator pool"), 1)
             self.assertIn("current task holds its reservation", claude)
             self.assertEqual((home / ".local/bin/sim-pool").resolve(), ROOT / "sim-pool")
+            codex_hooks = json.loads((codex / "hooks.json").read_text())["hooks"]["PreToolUse"]
+            claude_hooks = json.loads(settings.read_text())["hooks"]["PreToolUse"]
+            self.assertEqual(len(codex_hooks), 1)
+            self.assertEqual(len(claude_hooks), 2)
+            self.assertEqual(claude_hooks[0]["matcher"], "Edit")
+            self.assertEqual(claude_hooks[1], codex_hooks[0])

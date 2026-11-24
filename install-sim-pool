@@ -5,8 +5,10 @@ import argparse
 import json
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import sys
+import tempfile
 
 
 MARKER = "## Local iOS simulator pool"
@@ -61,11 +63,34 @@ def create_pool(source, state, device, runtime):
                 subprocess.run(["xcrun", "simctl", "delete", udid], check=False)
 
 
+def add_hook(path, source):
+    path = path.resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    config = json.loads(path.read_text()) if path.exists() else {}
+    hooks = config.setdefault("hooks", {}).setdefault("PreToolUse", [])
+    entry = {
+        "matcher": "^(Bash|exec_command|mcp__(Claude_Code_iOS_Simulator|xcodebuildmcp|mobilebuildmcp)__.*)$",
+        "hooks": [{"type": "command", "command": shlex.join([sys.executable, str(source)]), "timeout": 5}],
+    }
+    if entry in hooks:
+        return
+    hooks.append(entry)
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as file:
+            json.dump(config, file, indent=2)
+            file.write("\n")
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parent)
     parser.add_argument("--device", default="com.apple.CoreSimulator.SimDeviceType.iPhone-17")
     parser.add_argument("--runtime", default="com.apple.CoreSimulator.SimRuntime.iOS-27-0")
+    parser.add_argument("--hooks", action="store_true", help="Install Codex and Claude PreToolUse guards.")
     options = parser.parse_args()
 
     source = (options.repo / "sim-pool").resolve(strict=True)
@@ -93,6 +118,11 @@ def main():
     for path, is_claude in ((codex_path, False), (claude / "CLAUDE.md", True)):
         add_instructions(path, source, claude=is_claude)
         print(f"Configured {path}")
+    if options.hooks:
+        hook = source.with_name("sim-pool-hook").resolve(strict=True)
+        for path in (codex / "hooks.json", claude / "settings.json"):
+            add_hook(path, hook)
+            print(f"Configured simulator hook in {path}")
 
 
 if __name__ == "__main__":
