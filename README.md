@@ -62,6 +62,18 @@ known simulator-mutating tools. Use `sim-pool test` for XCTest. Read-only
 inventory and standard builds remain available. Use Terminal for manual
 administration of special devices.
 
+For interactive work on a dedicated simulator outside the pool, allow its UDID
+in the Claude hook:
+
+```sh
+./install-sim-pool --hooks --interactive-device SPECIAL_DEVICE_UDID
+```
+
+Repeat `--interactive-device` to allow multiple devices. Pass the approved UDID
+in every Claude simulator control call. The exception covers interactive
+actions such as screenshots, taps, typing and launching apps. It leaves
+direct XCTest and simulator deletion blocked.
+
 The guard only sees tool calls surfaced by the client. It does not govern
 manual Xcode or Simulator.app operations or indirect commands hidden in
 scripts. To remove it, remove its PreToolUse entry pointing to

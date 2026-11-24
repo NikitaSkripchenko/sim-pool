@@ -7,9 +7,9 @@ HOOK = Path(__file__).resolve().parents[1] / "sim-pool-hook"
 
 
 class HookTest(unittest.TestCase):
-    def call(self, tool, **arguments):
+    def call(self, tool, *, approved=(), **arguments):
         return subprocess.run(
-            [HOOK], input=json.dumps({"tool_name": tool, "tool_input": arguments}),
+            [HOOK, *[f"--interactive-device={udid}" for udid in approved]], input=json.dumps({"tool_name": tool, "tool_input": arguments}),
             capture_output=True, text=True, timeout=5,
         )
 
@@ -46,3 +46,15 @@ class HookTest(unittest.TestCase):
         ):
             with self.subTest(name=name, arguments=arguments):
                 self.assertEqual(self.call(name, **arguments).returncode, expected)
+
+
+    def test_claude_interaction_requires_explicit_approved_device(self):
+        server = "mcp__Claude_Code_iOS_Simulator__control"
+        duo = "58039C64-5C2E-4D1D-848A-417DFBC183A3"
+        for action in ("attach", "launch", "tap", "screenshot", "text", "open_url", "button"):
+            with self.subTest(action=action):
+                self.assertEqual(self.call(server, approved=[duo], device=duo.lower(),
+                                           action=action).returncode, 0)
+        self.assertEqual(self.call(server, approved=[duo], action="tap").returncode, 2)
+        self.assertEqual(self.call(server, approved=[duo], device="other", action="tap").returncode, 2)
+        self.assertEqual(self.call(server, approved=[duo], device=duo, action="erase").returncode, 2)

@@ -50,8 +50,9 @@ class InstallTest(unittest.TestCase):
 
             installer = ROOT / "install-sim-pool"
             self.assertTrue(installer.is_file(), "Repository installer is missing")
-            for _ in range(2):
-                result = subprocess.run([installer, "--hooks"], env=env, capture_output=True,
+            duo = "58039C64-5C2E-4D1D-848A-417DFBC183A3"
+            for extra in ([], ["--interactive-device", duo], ["--interactive-device", duo]):
+                result = subprocess.run([installer, "--hooks", *extra], env=env, capture_output=True,
                                         text=True, timeout=20)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn("Sim Pool A", result.stdout)
@@ -69,4 +70,5 @@ class InstallTest(unittest.TestCase):
             self.assertEqual(len(codex_hooks), 1)
             self.assertEqual(len(claude_hooks), 2)
             self.assertEqual(claude_hooks[0]["matcher"], "Edit")
-            self.assertEqual(claude_hooks[1], codex_hooks[0])
+            self.assertIn(duo, claude_hooks[1]["hooks"][0]["command"])
+            self.assertNotIn(duo, codex_hooks[0]["hooks"][0]["command"])
