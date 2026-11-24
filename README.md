@@ -39,6 +39,22 @@ sim-pool test -xctestrun /absolute/path/to/MyApp.xctestrun
 
 Use Ctrl-C to cancel a wait or active run. If cleanup fails or the runner is forcibly terminated, inspect `sim-pool status`. Once the recorded processes have exited, `sim-pool recover UDID` retries shutdown and erase for that slot. Recovery erases the named simulator.
 
+## Remove retired simulators
+
+Preview both the default set and Xcode's testing set. Pass the same keep list
+when applying the reviewed deletion list. Pool slots and recorded leases are
+protected automatically.
+
+```sh
+sim-pool prune --keep SPECIAL_DEVICE_UDID
+sim-pool prune --keep SPECIAL_DEVICE_UDID --delete RETIRED_UDID_1 RETIRED_UDID_2
+```
+
+Deletion is permanent. The command rejects the entire selection if any
+requested device is active, protected or missing at validation. Stop active
+devices separately after checking their owners. Runtime failures during deletion
+can leave a partially applied batch. Each completed deletion is printed.
+
 ## How the limit works
 
 Runner processes coordinate through a local file lock and a record of the current slots. Xcode runs outside the lock. A waiting command retries when capacity is available. Strict FIFO ordering is not guaranteed.

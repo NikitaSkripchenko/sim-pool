@@ -276,6 +276,47 @@ def status():
         print(f"{udid}  {label}  {detail}")
 
 
+def prune(args):
+    parser = argparse.ArgumentParser(prog="sim-pool prune", description="Preview or permanently delete explicit simulator UDIDs.")
+    parser.add_argument("--keep", action="append", default=[], help="Protect an extra UDID; repeat as needed.")
+    parser.add_argument("--delete", nargs="+", default=[], metavar="UDID", help="Permanently delete only these reviewed UDIDs.")
+    options = parser.parse_args(args)
+    extra = {str(uuid.UUID(udid)).upper() for udid in options.keep}
+    targets = dict.fromkeys(str(uuid.UUID(udid)).upper() for udid in options.delete)
+    with locked():
+        state = read_state()
+        devices = inventory()
+        protected = set(state["devices"]) | state["leases"].keys() | extra
+
+        def disposition(udid):
+            if udid not in devices:
+                return "missing"
+            if udid in protected:
+                return "keep"
+            return "candidate" if devices[udid]["state"] == "Shutdown" else "active"
+
+        missing = protected - devices.keys()
+        if missing:
+            raise PoolError(f"Cannot find protected devices: {', '.join(sorted(missing))}.")
+        if not targets:
+            for udid, device in sorted(devices.items(), key=lambda item: (item[1]["name"], item[0])):
+                device_set = "default" if device["default"] else "testing"
+                print(f"{udid}  {disposition(udid)}  {device_set}  {device['name']}")
+            return
+        invalid = [f"{udid} ({disposition(udid)})" for udid in targets if disposition(udid) != "candidate"]
+        if invalid:
+            raise PoolError(f"Cannot delete: {', '.join(invalid)}.")
+        for udid in targets:
+            if CANCELLED:
+                return 130
+            device_set = [] if devices[udid]["default"] else ["--set", "testing"]
+            subprocess.run(SIMCTL + device_set + ["delete", udid], check=True, timeout=30)
+            print(f"Deleted {udid}  {devices[udid]['name']}", flush=True)
+        if targets.keys() & inventory().keys():
+            raise PoolError("At least one deleted device is still in the simulator inventory.")
+    return 0
+
+
 CONTROLLED_FLAGS = {
     "-destination", "-parallel-testing-enabled", "-parallel-testing-worker-count",
     "-maximum-parallel-testing-workers", "-maximum-concurrent-test-simulator-destinations",
@@ -332,7 +373,7 @@ def main():
     signal.signal(signal.SIGINT, cancel)
     signal.signal(signal.SIGTERM, cancel)
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["init", "test", "status", "recover"])
+    parser.add_argument("command", choices=["init", "test", "status", "recover", "prune"])
     parser.add_argument("arguments", nargs=argparse.REMAINDER)
     parsed = parser.parse_args()
     args = parsed.arguments
@@ -344,8 +385,10 @@ def main():
         status()
     elif parsed.command == "recover" and len(args) == 1:
         return recover(args[0])
+    elif parsed.command == "prune":
+        return prune(args)
     else:
-        parser.error("Use init UDID UDID, test [Xcode options], status, or recover UDID.")
+        parser.error("Use init UDID UDID, test [Xcode options], status, recover UDID, or prune.")
     return 0
 
 

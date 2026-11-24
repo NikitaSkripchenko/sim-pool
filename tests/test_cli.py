@@ -37,7 +37,10 @@ with path.open('r+') as file:
             command, id = args[:2]
             if command == 'erase' and os.environ.get('FAIL_ERASE'):
                 sys.exit(17)
-            devices[id] = 'Booted' if command == 'bootstatus' else 'Shutdown'
+            if command == 'delete':
+                del devices[id]
+            else:
+                devices[id] = 'Booted' if command == 'bootstatus' else 'Shutdown'
             save()
         sys.exit()
     id = args[args.index('-destination') + 1].split('id=')[1]
@@ -193,6 +196,29 @@ class PoolTest(unittest.TestCase):
         args = self.rows()[0]["args"]
         self.assertIn("-collect-test-diagnostics", args)
         self.assertEqual(args[args.index("-collect-test-diagnostics") + 1], "never")
+
+    def test_prune_previews_then_deletes_only_requested_devices(self):
+        extra = "00000000-0000-4000-8000-000000000004"
+        self.devices.write_text(json.dumps(dict.fromkeys([*IDS, extra], "Shutdown")))
+        result = self.cli("prune", "--keep", extra)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"{IDS[2]}  candidate", result.stdout)
+        self.assertIn(f"{extra}  keep", result.stdout)
+        self.assertEqual(len(json.loads(self.devices.read_text())), 4)
+        result = self.cli("prune", "--keep", extra, "--delete", IDS[2])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(set(json.loads(self.devices.read_text())), {*IDS[:2], extra})
+
+    def test_prune_rejects_entire_batch_if_a_target_is_protected_or_running(self):
+        for target in IDS:
+            with self.subTest(target=target):
+                extra = "00000000-0000-4000-8000-000000000004"
+                devices = {**dict.fromkeys([*IDS, extra], "Shutdown"), IDS[2]: "Booted"}
+                self.devices.write_text(json.dumps(devices))
+                result = self.cli("prune", "--delete", extra, target)
+                self.assertNotEqual(result.returncode, 0, result.stderr)
+                self.assertIn(target, result.stderr)
+                self.assertEqual(json.loads(self.devices.read_text()), devices)
 
     def test_rejects_destination_overrides(self):
         result = self.cli("test", "-scheme", "Demo", "-destination", "platform=iOS Simulator")
